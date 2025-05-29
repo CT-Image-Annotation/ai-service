@@ -1,14 +1,19 @@
 # /// CONFIGURATION START:
 
+import json
 import os
+import uuid
+import zipfile
 # if using Apple MPS, fall back to CPU for unsupported ops
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from PIL import Image
-from flask import Blueprint, jsonify, request
-
+from flask import Blueprint, current_app, jsonify, request
+import shutil
+import base64
+import io
 
 # select the device for computation
 if torch.cuda.is_available():
@@ -34,6 +39,12 @@ elif device.type == "mps":
     )
 
 from sam2.build_sam import build_sam2_video_predictor
+
+def _data_url_to_array(data_url):
+    header, encoded = data_url.split(",", 1)
+    img_bytes = base64.b64decode(encoded)
+    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    return np.array(img)
 
 def _data_url_to_array(data_url):
     header, encoded = data_url.split(",", 1)
@@ -193,8 +204,27 @@ def medsam3d_run():
         "video_segments": {"0":{...}, "1":{...}, ...}
       }
     """
-    data = request.get_json(force=True)
-    video_dir = data.get('video_dir')
+    if 'zip' not in request.files:
+        return jsonify(error="Missing 'zip' file"), 404
+
+    zip_file = request.files['zip']
+    data = request.form
+    # Create UUID folder inside a configured temp directory
+    base_tmp_dir = current_app.config.get('TEMP_VIDEO_DIR', '/tmp/videos')
+    os.makedirs(base_tmp_dir, exist_ok=True)
+    uuid_dir = os.path.join(base_tmp_dir, str(uuid.uuid4()))
+    os.makedirs(uuid_dir)
+
+    # Save uploaded zip file to this folder
+    zip_path = os.path.join(uuid_dir, f"{uuid.uuid4()}.zip")
+    zip_file.save(zip_path)
+
+    # Unzip contents into the UUID folder
+    with zipfile.ZipFile(zip_path, 'r') as zipf:
+        zipf.extractall(uuid_dir)
+
+    # Now video_dir points to the extracted frames folder
+    video_dir = uuid_dir
     if not video_dir or not os.path.isdir(video_dir):
         return jsonify(error="Invalid or missing 'video_dir'"), 400
 
@@ -208,8 +238,8 @@ def medsam3d_run():
     # convert data URL to numpy array (implement helper separately)
     arr = _data_url_to_array(img_data)
 
-    points = np.array(data.get('point_coords', []))
-    labels = np.array(data.get('point_labels', []))
+    points = np.array(json.loads(data.get('point_coords', [])))
+    labels = np.array(json.loads(data.get('point_labels', [])))
     frame_idx = 0
     obj_id = 1
 
@@ -235,6 +265,10 @@ def medsam3d_run():
 
     # --- 4. reset state ---
     predictor.reset_state(state)
+    if os.path.exists(uuid_dir):
+        shutil.rmtree(uuid_dir)
+    if os.path.exists(zip_path):
+        shutil.rmtree(zip_file)
 
     return jsonify({
         'initial': {
