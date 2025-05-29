@@ -35,6 +35,12 @@ elif device.type == "mps":
 
 from sam2_train.build_sam import build_sam2_video_predictor
 
+def _data_url_to_array(data_url):
+    header, encoded = data_url.split(",", 1)
+    img_bytes = base64.b64decode(encoded)
+    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    return np.array(img)
+
 bp = Blueprint('MedSAM3D', __name__)
 
 CONFIG_FILENAME = 'sam2_hiera_s.yaml'
@@ -162,3 +168,79 @@ def propagate_video():
     inference_state = None
 
     return jsonify(video_segments=video_segments), 200
+
+
+@bp.route('/medsam3d/run', methods=['POST'])
+def medsam3d_run():
+    """
+    One-shot MEDSAM3D processing:
+    1. Init state with video_dir
+    2. Run predict_combined on first frame
+    3. Propagate masks throughout video
+    4. Reset state
+
+    POST JSON:
+      {
+        "video_dir": "/path/to/frames",
+        "image": "data:image/jpeg;base64,...",
+        "point_coords": [[x,y],...],   # optional
+        "point_labels": [1,0,...]       # optional
+      }
+
+    Response:
+      {
+        "initial": {"frame_idx":0, "obj_ids":[...], "masks":{...}},
+        "video_segments": {"0":{...}, "1":{...}, ...}
+      }
+    """
+    data = request.get_json(force=True)
+    video_dir = data.get('video_dir')
+    if not video_dir or not os.path.isdir(video_dir):
+        return jsonify(error="Invalid or missing 'video_dir'"), 400
+
+    # --- 1. initialize inference state ---
+    state = predictor.init_state(video_path=video_dir)
+
+    # --- 2. predict on first frame ---
+    img_data = data.get('image')
+    if not img_data:
+        return jsonify(error="Missing 'image' data URL"), 400
+    # convert data URL to numpy array (implement helper separately)
+    arr = _data_url_to_array(img_data)
+
+    points = np.array(data.get('point_coords', []))
+    labels = np.array(data.get('point_labels', []))
+    frame_idx = 0
+    obj_id = 1
+
+    _, obj_ids, mask_logits = predictor.add_new_points_or_box(
+        inference_state=state,
+        frame_idx=frame_idx,
+        obj_id=obj_id,
+        points=points,
+        labels=labels
+    )
+    initial_masks = {
+        int(oid): (mask_logits[i] > 0.0).cpu().numpy().tolist()
+        for i, oid in enumerate(obj_ids)
+    }
+
+    # --- 3. propagate throughout video ---
+    video_segments = {}
+    for fidx, oids, logits in predictor.propagate_in_video(state):
+        video_segments[int(fidx)] = {
+            int(oid): (logits[i] > 0.0).cpu().numpy().tolist()
+            for i, oid in enumerate(oids)
+        }
+
+    # --- 4. reset state ---
+    predictor.reset_state(state)
+
+    return jsonify({
+        'initial': {
+            'frame_idx': frame_idx,
+            'obj_ids': [int(x) for x in obj_ids],
+            'masks': initial_masks
+        },
+        'video_segments': video_segments
+    }), 200
