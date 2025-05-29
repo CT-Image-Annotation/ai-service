@@ -90,7 +90,8 @@ def _serialize_masks(masks, scores):
         # Convert each mask to a flat list of booleans
         # Ensure we're working with a boolean type mask
         bool_mask = mask.astype(bool)
-        mask_flat = bool_mask.flatten().tolist()
+        # mask_flat = bool_mask.flatten().tolist()
+        mask_flat = ''.join('1' if val else '0' for val in bool_mask.flatten())
         all_masks.append(mask_flat)
         all_scores.append(float(scores[i]))
     
