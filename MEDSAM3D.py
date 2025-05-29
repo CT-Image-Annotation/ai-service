@@ -33,7 +33,7 @@ elif device.type == "mps":
         "See e.g. https://github.com/pytorch/pytorch/issues/84936 for a discussion."
     )
 
-from sam2_train.build_sam import build_sam2_video_predictor
+from sam2.build_sam import build_sam2_video_predictor
 
 def _data_url_to_array(data_url):
     header, encoded = data_url.split(",", 1)
